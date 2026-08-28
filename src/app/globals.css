@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+/*
+ * A dark console theme. Video thumbnails read best against a near-black
+ * surface, so this app commits to dark rather than following the OS.
+ */
+@theme {
+  --color-canvas: #0a0b0d;
+  --color-surface: #131519;
+  --color-surface-hover: #1a1d23;
+  --color-line: #24272e;
+  --color-line-strong: #343842;
+  --color-ink: #f2f4f7;
+  --color-muted: #9aa2b1;
+  --color-faint: #6b7280;
+  --color-accent: #6366f1;
+  --color-accent-hover: #4f46e5;
+  --color-danger: #f87171;
+
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background-color: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Keyboard focus stays visible everywhere without ringing every mouse click. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background-image: linear-gradient(
+    90deg,
+    transparent,
+    rgb(255 255 255 / 0.05),
+    transparent
+  );
+  animation: shimmer 1.6s infinite;
+}
