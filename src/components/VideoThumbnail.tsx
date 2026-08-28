@@ -28,10 +28,19 @@ type Phase =
 
 const CACHE_PREFIX = "video-thumbnail:";
 const MAX_THUMBNAIL_WIDTH = 640;
-/** How far into the video to look for a representative, non-black frame. */
-const SEEK_FRACTION = 0.2;
-const MAX_SEEK_SECONDS = 3;
-const LOAD_TIMEOUT_MS = 20_000;
+const LOAD_TIMEOUT_MS = 30_000;
+
+/*
+ * Where to look for a frame worth showing, as a fraction of the running time.
+ * Opening seconds are usually a title card or a fade from black, so start a
+ * quarter of the way in and keep a couple of alternates for the times that
+ * lands on a dark shot. Seeking is cheap here because the stream route serves
+ * byte ranges, so an alternate costs a few KB rather than a fresh download.
+ */
+const SEEK_FRACTIONS = [0.25, 0.55, 0.1];
+
+/** Mean luma (0-255) below which a frame is treated as too dark to be useful. */
+const MIN_USEFUL_LUMA = 26;
 
 /*
  * Browsers cap connections per host at around six. Letting every on-screen
@@ -72,6 +81,12 @@ function requestLoadSlot(start: () => void): () => void {
   };
 }
 
+/** Clamps the chosen sample point inside the file. */
+function seekTarget(duration: number, attempt: number): number {
+  const fraction = SEEK_FRACTIONS[attempt] ?? SEEK_FRACTIONS[0];
+  return Math.max(0.5, Math.min(duration * fraction, duration - 0.25));
+}
+
 function readCache(id: string): string | null {
   try {
     return sessionStorage.getItem(CACHE_PREFIX + id);
@@ -108,6 +123,9 @@ export function VideoThumbnail({ video }: { video: Video }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hasSeeked = useRef(false);
   const releaseSlot = useRef<(() => void) | null>(null);
+  const attempt = useRef(0);
+  const bestFrame = useRef<string | null>(null);
+  const bestLuma = useRef(-1);
 
   const [phase, setPhase] = useState<Phase>(posterUrl ? "captured" : "waiting");
   const [captured, setCaptured] = useState<string | null>(null);
@@ -161,12 +179,33 @@ export function VideoThumbnail({ video }: { video: Video }) {
     return () => window.clearTimeout(timer);
   }, [phase, finishLoad]);
 
-  const capture = useCallback(() => {
-    // The frame is on screen now, so the stream is no longer needed either way.
-    finishLoad();
+  /** Mean luma of the drawn frame, sampled sparsely because it only guides a choice. */
+  const meanLuma = useCallback((context: CanvasRenderingContext2D, width: number, height: number) => {
+    const { data } = context.getImageData(0, 0, width, height);
+    let total = 0;
+    let samples = 0;
+    // Every 16th pixel is plenty to tell a black frame from a lit one.
+    for (let i = 0; i < data.length; i += 4 * 16) {
+      total += 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+      samples += 1;
+    }
+    return samples ? total / samples : 0;
+  }, []);
 
+  /** Commits a still and lets the <video> unmount. */
+  const commit = useCallback(
+    (dataUrl: string) => {
+      writeCache(video.id, dataUrl);
+      setCaptured(dataUrl);
+      setPhase("captured");
+    },
+    [video.id],
+  );
+
+  const capture = useCallback(() => {
     const element = videoRef.current;
     if (!element || !element.videoWidth || !element.videoHeight) {
+      finishLoad();
       setPhase("frame");
       return;
     }
@@ -176,25 +215,50 @@ export function VideoThumbnail({ video }: { video: Video }) {
     canvas.width = Math.round(element.videoWidth * scale);
     canvas.height = Math.round(element.videoHeight * scale);
 
-    const context = canvas.getContext("2d");
+    const context = canvas.getContext("2d", { willReadFrequently: true });
     if (!context) {
+      finishLoad();
       setPhase("frame");
       return;
     }
     context.drawImage(element, 0, 0, canvas.width, canvas.height);
 
+    let dataUrl: string;
+    let luma: number;
     try {
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.72);
-      writeCache(video.id, dataUrl);
-      setCaptured(dataUrl);
-      // Swapping to an <img> lets the <video> unmount and release its socket.
-      setPhase("captured");
+      dataUrl = canvas.toDataURL("image/jpeg", 0.72);
+      luma = meanLuma(context, canvas.width, canvas.height);
     } catch {
       // A tainted canvas would land here. The seeked frame is already on
       // screen and looks the same, so just keep showing it.
+      finishLoad();
       setPhase("frame");
+      return;
     }
-  }, [video.id, finishLoad]);
+
+    // Hold on to the brightest frame seen so far as the fallback.
+    if (luma > bestLuma.current) {
+      bestLuma.current = luma;
+      bestFrame.current = dataUrl;
+    }
+
+    const nextAttempt = attempt.current + 1;
+    if (luma >= MIN_USEFUL_LUMA || nextAttempt >= SEEK_FRACTIONS.length) {
+      finishLoad();
+      commit(luma >= MIN_USEFUL_LUMA ? dataUrl : (bestFrame.current ?? dataUrl));
+      return;
+    }
+
+    // Too dark to be useful: try another point in the running time.
+    attempt.current = nextAttempt;
+    const duration = element.duration;
+    if (!Number.isFinite(duration) || duration <= 0) {
+      finishLoad();
+      commit(bestFrame.current ?? dataUrl);
+      return;
+    }
+    element.currentTime = seekTarget(duration, nextAttempt);
+  }, [finishLoad, commit, meanLuma]);
 
   const handleLoadedMetadata = useCallback(() => {
     const element = videoRef.current;
@@ -203,16 +267,13 @@ export function VideoThumbnail({ video }: { video: Video }) {
 
     setDuration(element.duration);
 
-    const target = Number.isFinite(element.duration)
-      ? Math.min(MAX_SEEK_SECONDS, element.duration * SEEK_FRACTION)
-      : 0.1;
-
-    // Seeking to 0 never fires `seeked`, so capture straight away instead.
-    if (target <= 0) {
+    const duration = element.duration;
+    if (!Number.isFinite(duration) || duration <= 0) {
+      // Unknown length (a live or malformed file): take whatever is decoded.
       capture();
       return;
     }
-    element.currentTime = target;
+    element.currentTime = seekTarget(duration, 0);
   }, [capture]);
 
   const handleError = useCallback(() => {

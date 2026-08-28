@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { Video } from "@/lib/videos";
@@ -183,7 +184,7 @@ export function WatchPlayer({ video }: { video: Video }) {
         }`}
       >
         <div className="pointer-events-auto flex min-w-0 items-center gap-3">
-          <a
+          <Link
             href="/"
             title="Back to the library"
             className="rounded-lg bg-white/10 p-2 text-white transition-colors hover:bg-white/20"
@@ -201,7 +202,7 @@ export function WatchPlayer({ video }: { video: Video }) {
               <path d="M19 12H5m0 0 6-6m-6 6 6 6" />
             </svg>
             <span className="sr-only">Back to the library</span>
-          </a>
+          </Link>
           <div className="min-w-0">
             <h1 className="truncate text-base font-semibold text-white sm:text-lg">
               {video.title}
