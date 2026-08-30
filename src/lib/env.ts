@@ -1,7 +1,9 @@
 /**
  * Central place for the environment variables this app runs on.
- * There is no database: credentials and the video catalog both come from
- * the environment.
+ *
+ * There is no database. Credentials live here; the video sources are described
+ * in `sources.ts`, and which of their files actually exist is discovered by the
+ * scanner and kept in the manifest.
  */
 
 function required(name: string): string {
@@ -37,33 +39,31 @@ export function sessionMaxAge(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 60 * 60 * 12;
 }
 
-/** Optional JSON array of videos. Takes precedence over the numbered range. */
-export function videosJson(): string | undefined {
-  return process.env.VIDEOS_JSON;
+/** Whether the background scanner starts on its own with the server. */
+export function scanEnabled(): boolean {
+  const raw = (process.env.VIDEO_SCAN_ENABLED || "").trim().toLowerCase();
+  return raw !== "false" && raw !== "0" && raw !== "off";
 }
 
-/** Directory the numbered video files live under, e.g. `https://host/files/`. */
-export function videoBaseUrl(): string | undefined {
-  return process.env.VIDEO_BASE_URL;
+/**
+ * How many probes the scanner keeps in flight. Deliberately modest: it shares
+ * the server with people actually watching videos.
+ */
+export function scanConcurrency(): number {
+  const raw = Number.parseInt(process.env.VIDEO_SCAN_CONCURRENCY || "", 10);
+  return Number.isFinite(raw) && raw > 0 ? Math.min(raw, 32) : 6;
 }
 
-/** First and last file number in the range, inclusive. */
-export function videoIdRange(): { start?: string; end?: string } {
-  return {
-    start: process.env.VIDEO_ID_START,
-    end: process.env.VIDEO_ID_END,
-  };
+/** How many videos go in each folder inside a link. Defaults to 1000. */
+export function videoFolderSize(): number {
+  const raw = process.env.VIDEO_FOLDER_SIZE;
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1000;
 }
 
-/** File extension for the numbered range. Defaults to `.mp4`. */
-export function videoExtension(): string {
-  const raw = (process.env.VIDEO_EXTENSION || ".mp4").trim();
-  return raw.startsWith(".") ? raw : `.${raw}`;
-}
-
-/** How many videos to show per page. Defaults to 24. */
+/** How many videos to show per page. Defaults to 10. */
 export function videoPageSize(): number {
   const raw = process.env.VIDEO_PAGE_SIZE;
   const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
-  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 120) : 24;
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 120) : 10;
 }

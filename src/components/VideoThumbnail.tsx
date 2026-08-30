@@ -11,8 +11,6 @@ import type { Video } from "@/lib/videos";
  * /api/videos/[id]/stream route, which keeps it same-origin (an unproxied
  * cross-origin video would taint the canvas) and answers Range requests (so
  * seeking costs a few KB instead of the whole file).
- *
- * A configured `poster` short-circuits all of this.
  */
 
 type Phase =
@@ -87,17 +85,22 @@ function seekTarget(duration: number, attempt: number): number {
   return Math.max(0.5, Math.min(duration * fraction, duration - 0.25));
 }
 
-function readCache(id: string): string | null {
+/** Two links can both contain id 1234, so the key carries the source. */
+function cacheKey(video: Video): string {
+  return `${CACHE_PREFIX}${video.sourceId}:${video.id}`;
+}
+
+function readCache(key: string): string | null {
   try {
-    return sessionStorage.getItem(CACHE_PREFIX + id);
+    return sessionStorage.getItem(key);
   } catch {
     return null;
   }
 }
 
-function writeCache(id: string, value: string): void {
+function writeCache(key: string, value: string): void {
   try {
-    sessionStorage.setItem(CACHE_PREFIX + id, value);
+    sessionStorage.setItem(key, value);
   } catch {
     // Private browsing or a full quota: the thumbnail just won't be reused.
   }
@@ -116,9 +119,6 @@ function formatDuration(seconds: number): string {
 }
 
 export function VideoThumbnail({ video }: { video: Video }) {
-  // A configured poster short-circuits everything: no capture, no <video>.
-  const posterUrl = video.posterUrl;
-
   const rootRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hasSeeked = useRef(false);
@@ -127,11 +127,9 @@ export function VideoThumbnail({ video }: { video: Video }) {
   const bestFrame = useRef<string | null>(null);
   const bestLuma = useRef(-1);
 
-  const [phase, setPhase] = useState<Phase>(posterUrl ? "captured" : "waiting");
-  const [captured, setCaptured] = useState<string | null>(null);
+  const [phase, setPhase] = useState<Phase>("waiting");
+  const [thumbnail, setCaptured] = useState<string | null>(null);
   const [duration, setDuration] = useState<number | null>(null);
-
-  const thumbnail = posterUrl ?? captured;
 
   /** Hands the load slot back so the next queued card can start. */
   const finishLoad = useCallback(() => {
@@ -142,7 +140,7 @@ export function VideoThumbnail({ video }: { video: Video }) {
   // Nothing is requested until the card is near the viewport. A still captured
   // earlier this session is reused, so paging back and forth stays instant.
   useEffect(() => {
-    if (posterUrl || phase !== "waiting") return;
+    if (phase !== "waiting") return;
     const element = rootRef.current;
     if (!element) return;
 
@@ -151,7 +149,7 @@ export function VideoThumbnail({ video }: { video: Video }) {
         if (!entries.some((entry) => entry.isIntersecting)) return;
         observer.disconnect();
 
-        const cached = readCache(video.id);
+        const cached = readCache(cacheKey(video));
         if (cached) {
           setCaptured(cached);
           setPhase("captured");
@@ -164,7 +162,7 @@ export function VideoThumbnail({ video }: { video: Video }) {
 
     observer.observe(element);
     return () => observer.disconnect();
-  }, [posterUrl, phase, video.id]);
+  }, [phase, video]);
 
   // Never hold a slot past unmount — paging away must not stall the next page.
   useEffect(() => finishLoad, [finishLoad]);
@@ -195,11 +193,11 @@ export function VideoThumbnail({ video }: { video: Video }) {
   /** Commits a still and lets the <video> unmount. */
   const commit = useCallback(
     (dataUrl: string) => {
-      writeCache(video.id, dataUrl);
+      writeCache(cacheKey(video), dataUrl);
       setCaptured(dataUrl);
       setPhase("captured");
     },
-    [video.id],
+    [video],
   );
 
   const capture = useCallback(() => {

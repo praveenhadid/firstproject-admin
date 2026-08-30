@@ -3,12 +3,12 @@ import { getVideoSource, toPublicVideo } from "@/lib/videos";
 
 export async function GET(
   _request: Request,
-  { params }: { params: Promise<{ id: string }> },
+  { params }: { params: Promise<{ source: string; id: string }> },
 ) {
   if (!(await getSession())) return unauthorizedResponse();
 
-  const { id } = await params;
-  const video = getVideoSource(id);
+  const { source, id } = await params;
+  const video = getVideoSource(source, id);
   if (!video) return Response.json({ error: "Not found." }, { status: 404 });
 
   return Response.json({ video: toPublicVideo(video) });

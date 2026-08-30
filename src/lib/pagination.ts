@@ -26,23 +26,41 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
-/** Turns untrusted `?page=`/`?limit=` values into a usable slice of the library. */
+/** Works out the slice of the library a given page covers. */
+export function paginate(
+  total: number,
+  page: number,
+  pageSize = videoPageSize(),
+): Pagination {
+  const size = clamp(pageSize, 1, MAX_PAGE_SIZE);
+  const totalPages = Math.max(1, Math.ceil(total / size));
+  const current = clamp(page, 1, totalPages);
+
+  return {
+    page: current,
+    pageSize: size,
+    total,
+    totalPages,
+    offset: (current - 1) * size,
+  };
+}
+
+/** Same thing for the API, where page and limit arrive as untrusted strings. */
 export function resolvePagination(
   total: number,
   pageParam?: string | string[] | null,
   limitParam?: string | string[] | null,
 ): Pagination {
-  const pageSize = clamp(toInt(limitParam) ?? videoPageSize(), 1, MAX_PAGE_SIZE);
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const page = clamp(toInt(pageParam) ?? 1, 1, totalPages);
-
-  return {
-    page,
-    pageSize,
+  return paginate(
     total,
-    totalPages,
-    offset: (page - 1) * pageSize,
-  };
+    toInt(pageParam) ?? 1,
+    toInt(limitParam) ?? videoPageSize(),
+  );
+}
+
+/** Page 1 is the folder itself; the rest are numbered segments under it. */
+export function pageHref(basePath: string, page: number): string {
+  return page <= 1 ? basePath : `${basePath}/page/${page}`;
 }
 
 /**
@@ -52,7 +70,7 @@ export function resolvePagination(
 export function pageWindow(
   page: number,
   totalPages: number,
-  span = 1,
+  span = 2,
 ): (number | "gap")[] {
   const pages = new Set<number>([1, totalPages]);
   for (let offset = -span; offset <= span; offset += 1) {

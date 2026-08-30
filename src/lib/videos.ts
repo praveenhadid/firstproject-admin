@@ -1,226 +1,185 @@
-import defaultVideos from "@/data/videos.json";
-import {
-  videoBaseUrl,
-  videoExtension,
-  videoIdRange,
-  videosJson,
-} from "@/lib/env";
+import { videoFolderSize } from "@/lib/env";
+import { getSourceManifest, hasVideoId } from "@/lib/manifest";
+import { getSource, getSources, type SourceConfig } from "@/lib/sources";
 
-/** A video as configured on the server. `url` never leaves the server. */
+/** A video as configured on the server. */
 export type VideoSource = {
   id: string;
+  sourceId: string;
   title: string;
   url: string;
-  description?: string;
-  /** Optional thumbnail URL. When absent the browser grabs a frame instead. */
-  poster?: string;
 };
 
-/** The shape sent to the browser: proxied URLs only, no upstream address. */
+/** The shape sent to the browser. */
 export type Video = {
   id: string;
+  sourceId: string;
   title: string;
-  description?: string;
+  /** The file on the source server. Cards link straight here. */
+  sourceUrl: string;
+  /** Same file, proxied through this app so the canvas can read frames. */
   streamUrl: string;
-  posterUrl?: string;
 };
 
-/**
- * Two ways to describe a library:
- *
- * - `list`  — an explicit array, from VIDEOS_JSON or src/data/videos.json.
- * - `range` — a base URL plus a run of numbered files, e.g. 71459.mp4 through
- *   72669.mp4. Kept as bounds rather than an expanded array so that looking a
- *   video up stays O(1) even across thousands of files; the stream route does
- *   this on every byte-range request.
- */
-type Catalog =
-  | { kind: "list"; items: VideoSource[]; byId: Map<string, VideoSource> }
-  | {
-      kind: "range";
-      base: string;
-      start: number;
-      end: number;
-      extension: string;
-      pad: number;
-    };
+/** A link on the dashboard: one source, holding folders of videos. */
+export type SourceSummary = {
+  id: string;
+  label: string;
+  count: number;
+  folders: number;
+};
 
-function slugify(value: string, fallback: string): string {
-  const slug = value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug || fallback;
+/** A group of videos inside a link. */
+export type Folder = {
+  id: string;
+  sourceId: string;
+  label: string;
+  count: number;
+};
+
+function videoFor(source: SourceConfig, id: string): VideoSource {
+  return {
+    id,
+    sourceId: source.id,
+    title: id,
+    url: `${source.base}/${id}${source.extension}`,
+  };
 }
 
-function parseList(entries: unknown, origin: string): VideoSource[] {
-  if (!Array.isArray(entries)) {
-    throw new Error(`${origin} must be a JSON array.`);
+/**
+ * Chunks one source's found ids into fixed-size folders.
+ *
+ * The manifest holds only ids confirmed to exist, so every card in every
+ * folder points at a real file. Chunking the list of found files — rather than
+ * the id space — is what keeps each folder exactly `VIDEO_FOLDER_SIZE` videos
+ * even though the numbering itself is full of gaps.
+ */
+function chunk(ids: number[], size: number): number[][] {
+  const chunks: number[][] = [];
+  for (let start = 0; start < ids.length; start += size) {
+    chunks.push(ids.slice(start, start + size));
   }
+  return chunks;
+}
 
-  const seen = new Set<string>();
+function folderId(slice: number[]): string {
+  return `${slice[0]}-${slice[slice.length - 1]}`;
+}
 
-  return entries.flatMap((entry, index): VideoSource[] => {
-    if (!entry || typeof entry !== "object") return [];
-    const item = entry as Record<string, unknown>;
-    const url = typeof item.url === "string" ? item.url.trim() : "";
-    if (!url) return [];
+// Rebuilt whenever the scanner finds more files; the revision says when.
+type Cached = { revision: number; chunks: number[][] };
+const cache = new Map<string, Cached>();
 
-    const title =
-      typeof item.title === "string" && item.title.trim()
-        ? item.title.trim()
-        : `Video ${index + 1}`;
+function chunksFor(sourceId: string): number[][] {
+  const { ids, revision } = getSourceManifest(sourceId);
+  const hit = cache.get(sourceId);
+  if (hit && hit.revision === revision) return hit.chunks;
 
-    let id =
-      typeof item.id === "string" && item.id.trim()
-        ? slugify(item.id, `video-${index + 1}`)
-        : slugify(title, `video-${index + 1}`);
+  const chunks = chunk(ids, videoFolderSize());
+  cache.set(sourceId, { revision, chunks });
+  return chunks;
+}
 
-    // Ids address the stream route, so they have to be unique.
-    if (seen.has(id)) id = `${id}-${index + 1}`;
-    seen.add(id);
-
-    return [
-      {
-        id,
-        title,
-        url,
-        description:
-          typeof item.description === "string" ? item.description : undefined,
-        poster: typeof item.poster === "string" ? item.poster : undefined,
-      },
-    ];
+/** Every configured link, with how much has been found under it so far. */
+export function getSourceSummaries(): SourceSummary[] {
+  return getSources().map((source) => {
+    const chunks = chunksFor(source.id);
+    return {
+      id: source.id,
+      label: source.label,
+      count: chunks.reduce((sum, slice) => sum + slice.length, 0),
+      folders: chunks.length,
+    };
   });
 }
 
-function toListCatalog(items: VideoSource[]): Catalog {
-  return {
-    kind: "list",
-    items,
-    byId: new Map(items.map((item) => [item.id, item])),
-  };
+export function getSourceSummary(sourceId: string): SourceSummary | undefined {
+  return getSourceSummaries().find((source) => source.id === sourceId);
 }
 
-function buildCatalog(): Catalog {
-  const json = videosJson();
-  if (json) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(json);
-    } catch (error) {
-      throw new Error(
-        `VIDEOS_JSON is not valid JSON: ${(error as Error).message}`,
-      );
-    }
-    return toListCatalog(parseList(parsed, "VIDEOS_JSON"));
-  }
+/** The folders inside one link. */
+export function getFolders(sourceId: string): Folder[] {
+  const source = getSource(sourceId);
+  if (!source) return [];
 
-  const base = videoBaseUrl()?.trim();
-  if (base) {
-    const { start: rawStart, end: rawEnd } = videoIdRange();
-    const start = Number.parseInt(rawStart ?? "", 10);
-    const end = Number.parseInt(rawEnd ?? "", 10);
-
-    if (!Number.isFinite(start) || !Number.isFinite(end)) {
-      throw new Error(
-        "VIDEO_BASE_URL is set, so VIDEO_ID_START and VIDEO_ID_END must both be numbers.",
-      );
-    }
-    if (end < start) {
-      throw new Error("VIDEO_ID_END must be greater than or equal to VIDEO_ID_START.");
-    }
-
-    return {
-      kind: "range",
-      base: base.replace(/\/+$/, ""),
-      start,
-      end,
-      extension: videoExtension(),
-      // Only pad when the configured start actually carries leading zeros.
-      pad: rawStart?.startsWith("0") ? rawStart.length : 0,
-    };
-  }
-
-  return toListCatalog(parseList(defaultVideos, "src/data/videos.json"));
+  return chunksFor(sourceId).map((slice) => ({
+    id: folderId(slice),
+    sourceId,
+    label: `${slice[0]}–${slice[slice.length - 1]}`,
+    count: slice.length,
+  }));
 }
 
-// Env is fixed for the life of the process, so build the catalog once.
-let cached: Catalog | undefined;
-
-function catalog(): Catalog {
-  if (!cached) cached = buildCatalog();
-  return cached;
+function findChunk(sourceId: string, id: string): number[] | undefined {
+  return chunksFor(sourceId).find((slice) => folderId(slice) === id);
 }
 
-function rangeItem(
-  entry: Extract<Catalog, { kind: "range" }>,
-  value: number,
-): VideoSource {
-  const id = String(value).padStart(entry.pad, "0");
+export function getFolder(sourceId: string, id: string): Folder | undefined {
+  const slice = findChunk(sourceId, id);
+  if (!slice) return undefined;
   return {
     id,
-    title: id,
-    url: `${entry.base}/${id}${entry.extension}`,
+    sourceId,
+    label: `${slice[0]}–${slice[slice.length - 1]}`,
+    count: slice.length,
   };
 }
 
-/** Total number of videos in the library. */
-export function getVideoCount(): number {
-  const entry = catalog();
-  return entry.kind === "list" ? entry.items.length : entry.end - entry.start + 1;
-}
-
-/**
- * One page of videos. Slicing here rather than in the page component means a
- * range catalog is never expanded into a full array.
- */
-export function getVideoSourcePage(
-  offset: number,
-  limit: number,
-): VideoSource[] {
-  const entry = catalog();
-  const total = getVideoCount();
-  const from = Math.max(0, Math.min(offset, total));
-  const to = Math.max(from, Math.min(from + limit, total));
-
-  if (entry.kind === "list") return entry.items.slice(from, to);
-
-  const page: VideoSource[] = [];
-  for (let index = from; index < to; index += 1) {
-    page.push(rangeItem(entry, entry.start + index));
-  }
-  return page;
-}
-
-/** One configured video by id, or undefined. Server use only. */
-export function getVideoSource(id: string): VideoSource | undefined {
-  const entry = catalog();
-  if (entry.kind === "list") return entry.byId.get(id);
-
-  // Reject anything that isn't a plain number inside the configured bounds,
-  // so an id can never be used to point the proxy at another path.
-  if (!/^\d+$/.test(id)) return undefined;
-  const value = Number.parseInt(id, 10);
-  if (!Number.isFinite(value) || value < entry.start || value > entry.end) {
-    return undefined;
-  }
-  return rangeItem(entry, value);
-}
-
-/** Strips the upstream URL and points the client at our own API instead. */
 export function toPublicVideo(video: VideoSource): Video {
+  const path = `${encodeURIComponent(video.sourceId)}/${encodeURIComponent(video.id)}`;
   return {
     id: video.id,
+    sourceId: video.sourceId,
     title: video.title,
-    description: video.description,
-    streamUrl: `/api/videos/${encodeURIComponent(video.id)}/stream`,
-    posterUrl: video.poster
-      ? `/api/videos/${encodeURIComponent(video.id)}/poster`
-      : undefined,
+    sourceUrl: video.url,
+    streamUrl: `/api/videos/${path}/stream`,
   };
 }
 
-/** One page of the catalog as the browser sees it. */
-export function getVideoPage(offset: number, limit: number): Video[] {
-  return getVideoSourcePage(offset, limit).map(toPublicVideo);
+/** One page of one folder, as the browser sees it. */
+export function getVideoPage(
+  sourceId: string,
+  folder: string,
+  offset: number,
+  limit: number,
+): Video[] {
+  const source = getSource(sourceId);
+  const slice = findChunk(sourceId, folder);
+  if (!source || !slice) return [];
+
+  return slice
+    .slice(offset, offset + limit)
+    .map((id) => toPublicVideo(videoFor(source, String(id))));
+}
+
+/** The first video of a folder, used as its cover. */
+export function getFolderCover(
+  sourceId: string,
+  folder: string,
+): Video | undefined {
+  const [first] = getVideoPage(sourceId, folder, 0, 1);
+  return first;
+}
+
+/** The first video of a whole link, used as its cover on the dashboard. */
+export function getSourceCover(sourceId: string): Video | undefined {
+  const [firstChunk] = chunksFor(sourceId);
+  if (!firstChunk?.length) return undefined;
+  return getFolderCover(sourceId, folderId(firstChunk));
+}
+
+/** One video by source and id. Server use only. */
+export function getVideoSource(
+  sourceId: string,
+  id: string,
+): VideoSource | undefined {
+  const source = getSource(sourceId);
+  if (!source) return undefined;
+
+  // Reject anything that isn't a plain number we have actually seen, so an id
+  // can never be used to point the proxy at another path.
+  if (!/^\d+$/.test(id)) return undefined;
+  if (!hasVideoId(sourceId, Number.parseInt(id, 10))) return undefined;
+
+  return videoFor(source, id);
 }

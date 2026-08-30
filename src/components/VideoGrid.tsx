@@ -26,18 +26,19 @@ export function VideoGrid({ videos }: { videos: Video[] }) {
   }
 
   return (
-    <ul className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+    <ul className="grid grid-cols-1 gap-5 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-5">
       {videos.map((video) => (
         <li key={video.id}>
           {/*
-            A plain anchor rather than next/link: each card opens its own tab,
-            and prefetching a library this size would be pure waste.
+            Links straight to the file on the source server, which browsers
+            open in their own player. `noreferrer` keeps this app's URLs out
+            of the request that server sees.
           */}
           <a
-            href={`/watch/${encodeURIComponent(video.id)}`}
+            href={video.sourceUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="group block w-full overflow-hidden rounded-xl border border-line bg-surface text-left transition-colors hover:border-line-strong hover:bg-surface-hover"
+            className="group block w-full overflow-hidden rounded-xl border border-line bg-surface text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-line-strong hover:bg-surface-hover hover:shadow-xl hover:shadow-black/40"
           >
             <div className="relative">
               <VideoThumbnail video={video} />
@@ -60,11 +61,6 @@ export function VideoGrid({ videos }: { videos: Video[] }) {
               <h2 className="truncate text-sm font-medium text-ink">
                 {video.title}
               </h2>
-              {video.description ? (
-                <p className="mt-1 truncate text-xs text-muted">
-                  {video.description}
-                </p>
-              ) : null}
             </div>
           </a>
         </li>
